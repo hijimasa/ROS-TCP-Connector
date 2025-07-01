@@ -137,8 +137,15 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
 #if !ROS2
             value = System.Text.Encoding.UTF8.GetString(data, offset, length);
 #else
-            // ROS2 strings have a null byte at the end
-            value = System.Text.Encoding.UTF8.GetString(data, offset, length - 1);
+            if (length == 0)
+            {
+                value = "";
+            }
+            else
+            {
+                // ROS2 strings have a null byte at the end
+                value = System.Text.Encoding.UTF8.GetString(data, offset, length - 1);
+            }
 #endif
             offset += length;
         }
