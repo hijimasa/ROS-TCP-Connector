@@ -444,7 +444,11 @@ namespace Unity.Robotics.ROSTCPConnector
             if (_instance == null)
             {
                 // Prefer to use the ROSConnection in the scene, if any
+#if UNITY_2023_2_OR_NEWER
+                _instance = FindFirstObjectByType<ROSConnection>();
+#else
                 _instance = FindObjectOfType<ROSConnection>();
+#endif
                 if (_instance != null)
                     return _instance;
 
