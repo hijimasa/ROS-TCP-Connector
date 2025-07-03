@@ -495,6 +495,11 @@ namespace Unity.Robotics.ROSTCPConnector
             if (ConnectOnStart)
                 Connect();
         }
+        void OnDestroy()
+        {
+            HudPanel.ClearStaticContent();
+            Disconnect();
+        }
 
         public void Connect(string ipAddress, int port)
         {

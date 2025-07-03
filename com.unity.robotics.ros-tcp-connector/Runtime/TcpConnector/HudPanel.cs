@@ -22,7 +22,8 @@ namespace Unity.Robotics.ROSTCPConnector
         static SortedList<int, IHudTab> s_HUDTabs = new SortedList<int, IHudTab>();
         static SortedList<int, Action> s_HeaderContents = new SortedList<int, Action>();
         static List<HudWindow> s_ActiveWindows = new List<HudWindow>();
-        static int s_NextWindowID = 101;
+        const int INITIAL_NEXT_WINDOW_ID = 101;
+        static int s_NextWindowID = INITIAL_NEXT_WINDOW_ID;
 
         // ROS Message variables
         internal bool isEnabled;
@@ -123,6 +124,13 @@ namespace Unity.Robotics.ROSTCPConnector
 
             s_HeaderContents.Add(index, headerContent);
         }
+        public static void ClearStaticContent()
+        {
+            s_HUDTabs.Clear();
+            s_HeaderContents.Clear();
+            s_ActiveWindows.Clear();
+            s_NextWindowID = INITIAL_NEXT_WINDOW_ID;
+        }
 
         public static void AddWindow(HudWindow window)
         {
@@ -204,24 +212,5 @@ namespace Unity.Robotics.ROSTCPConnector
 
             return result;
         }
-
-#if UNITY_EDITOR
-        // automatically clear all static content on pressing play
-        [UnityEditor.InitializeOnLoadMethod]
-        static void InitializeOnLoad()
-        {
-            UnityEditor.EditorApplication.playModeStateChanged += OnPlayMode;
-        }
-
-        static void OnPlayMode(UnityEditor.PlayModeStateChange change)
-        {
-            if (change == UnityEditor.PlayModeStateChange.ExitingEditMode)
-            {
-                s_HUDTabs.Clear();
-                s_HeaderContents.Clear();
-                s_ActiveWindows.Clear();
-            }
-        }
-#endif
     }
 }
