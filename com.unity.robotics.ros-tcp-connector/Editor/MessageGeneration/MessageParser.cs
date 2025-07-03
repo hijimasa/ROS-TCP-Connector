@@ -380,7 +380,16 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
         {
             if (type.Equals("string"))
             {
-                return "\"" + declaration.Trim() + "\";\n";
+                string trimmedDeclaration = declaration.Trim();
+                // Check if the string is already quoted
+                if (trimmedDeclaration.StartsWith("\"") && trimmedDeclaration.EndsWith("\""))
+                {
+                    return trimmedDeclaration + ";\n";
+                }
+                else
+                {
+                    return "\"" + trimmedDeclaration + "\";\n";
+                }
             }
             else
             {
