@@ -532,30 +532,42 @@ namespace Unity.Robotics.ROSTCPConnector
         // NB this callback is not running on the main thread, be cautious about modifying data here
         void OnConnectionStartedCallback(NetworkStream stream)
         {
-            RosTopicState[] topics;
             lock (m_Topics)
             {
-                topics = AllTopics.ToArray();
-            }
+                // Resize cached array if needed to avoid repeated allocations
+                int topicCount = m_Topics.Count;
+                if (m_CachedTopicsArray.Length < topicCount)
+                {
+                    m_CachedTopicsArray = new RosTopicState[topicCount];
+                }
+                m_Topics.Values.CopyTo(m_CachedTopicsArray, 0);
 
-            foreach (RosTopicState topicInfo in m_Topics.Values.ToArray())
-                topicInfo.OnConnectionEstablished(stream);
+                for (int i = 0; i < topicCount; i++)
+                {
+                    m_CachedTopicsArray[i].OnConnectionEstablished(stream);
+                }
+            }
 
             RefreshTopicsList();
         }
 
         void OnConnectionLostCallback()
         {
-            RosTopicState[] topics;
             lock (m_Topics)
             {
-                topics = AllTopics.ToArray();
-            }
+                // Resize cached array if needed to avoid repeated allocations
+                int topicCount = m_Topics.Count;
+                if (m_CachedTopicsArray.Length < topicCount)
+                {
+                    m_CachedTopicsArray = new RosTopicState[topicCount];
+                }
+                m_Topics.Values.CopyTo(m_CachedTopicsArray, 0);
 
-            foreach (RosTopicState topicInfo in topics)
-            {
-                //For all publishers, notify that they need to re-register.
-                topicInfo.OnConnectionLost();
+                for (int i = 0; i < topicCount; i++)
+                {
+                    //For all publishers, notify that they need to re-register.
+                    m_CachedTopicsArray[i].OnConnectionLost();
+                }
             }
         }
 
@@ -772,7 +784,8 @@ namespace Unity.Robotics.ROSTCPConnector
         static void SendKeepalive(NetworkStream stream)
         {
             // 8 zeroes = a ros message with topic "" and no message data.
-            stream.Write(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0 }, 0, 8);
+            // Use cached buffer to avoid GC allocation
+            stream.Write(s_KeepaliveBuffer, 0, 8);
         }
 
         static void ClearMessageQueue(OutgoingMessageQueue queue)
@@ -957,6 +970,12 @@ namespace Unity.Robotics.ROSTCPConnector
         static byte[] s_FourBytes = new byte[4];
         static byte[] s_TopicScratchSpace = new byte[64];
 
+        // Cached keepalive buffer to avoid GC allocation on every keepalive
+        static readonly byte[] s_KeepaliveBuffer = new byte[] { 0, 0, 0, 0, 0, 0, 0, 0 };
+
+        // Cached array for topic iteration to avoid ToArray() allocations
+        private RosTopicState[] m_CachedTopicsArray = new RosTopicState[0];
+
         static async Task<Tuple<string, byte[]>> ReadMessageContents(NetworkStream networkStream, int sleepMilliseconds, CancellationToken token)
         {
             // Get first bytes to determine length of topic name
@@ -1069,21 +1088,27 @@ namespace Unity.Robotics.ROSTCPConnector
 
         void DrawHeaderGUI()
         {
-            GUIStyle labelStyle = new GUIStyle
+            // Use cached GUIStyle objects to avoid GC allocation every frame
+            if (s_LabelStyle == null)
             {
-                alignment = TextAnchor.MiddleLeft,
-                normal = { textColor = Color.white },
-                fontStyle = FontStyle.Bold,
-                fixedWidth = 250
-            };
+                s_LabelStyle = new GUIStyle
+                {
+                    alignment = TextAnchor.MiddleLeft,
+                    normal = { textColor = Color.white },
+                    fontStyle = FontStyle.Bold,
+                    fixedWidth = 250
+                };
+            }
 
-            GUIStyle contentStyle = new GUIStyle
+            if (s_ContentStyle == null)
             {
-                alignment = TextAnchor.MiddleLeft,
-                padding = new RectOffset(10, 0, 0, 5),
-                normal = { textColor = Color.white },
-            };
-
+                s_ContentStyle = new GUIStyle
+                {
+                    alignment = TextAnchor.MiddleLeft,
+                    padding = new RectOffset(10, 0, 0, 5),
+                    normal = { textColor = Color.white },
+                };
+            }
 
             // ROS IP Setup
             GUILayout.BeginHorizontal(GUILayout.Width(300));
@@ -1105,7 +1130,7 @@ namespace Unity.Robotics.ROSTCPConnector
 #endif
 
             GUILayout.Space(30);
-            GUILayout.Label($"{protocolName} IP: ", labelStyle, GUILayout.Width(100));
+            GUILayout.Label($"{protocolName} IP: ", s_LabelStyle, GUILayout.Width(100));
 
             if (!HasConnectionThread)
             {
@@ -1128,7 +1153,7 @@ namespace Unity.Robotics.ROSTCPConnector
             }
             else
             {
-                GUILayout.Label($"{RosIPAddress}:{RosPort}", contentStyle);
+                GUILayout.Label($"{RosIPAddress}:{RosPort}", s_ContentStyle);
 
                 if (HasConnectionError)
                 {
@@ -1141,6 +1166,10 @@ namespace Unity.Robotics.ROSTCPConnector
         }
 
         static GUIStyle s_ConnectionArrowStyle;
+
+        // Cached GUIStyle objects to avoid GC allocation every frame
+        static GUIStyle s_LabelStyle;
+        static GUIStyle s_ContentStyle;
 
         public static void DrawConnectionArrows(bool withBar, float x, float y, float receivedTime, float sentTime, bool isPublisher, bool isSubscriber, bool hasError)
         {
