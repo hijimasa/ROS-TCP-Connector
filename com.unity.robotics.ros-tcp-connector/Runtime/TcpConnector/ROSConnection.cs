@@ -209,6 +209,18 @@ namespace Unity.Robotics.ROSTCPConnector
                 info.UnsubscribeAll();
         }
 
+        /// <summary>
+        /// Stop publishing a topic and tell the endpoint to drop its publisher,
+        /// so the topic goes away instead of lingering for the lifetime of the
+        /// connection. The publishing-side counterpart of Unsubscribe.
+        /// </summary>
+        public void UnregisterPublisher(string topic)
+        {
+            RosTopicState info = GetTopic(topic);
+            if (info != null)
+                info.UnregisterPublisher();
+        }
+
         // Version for when the message type is unknown at compile time
         public void SubscribeByMessageName(string topic, string rosMessageName, Action<Message> callback)
         {

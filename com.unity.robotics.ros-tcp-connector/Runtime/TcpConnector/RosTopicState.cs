@@ -208,6 +208,27 @@ namespace Unity.Robotics.ROSTCPConnector
             CreateMessageSender(queueSize);
         }
 
+        /// <summary>
+        /// Stop publishing this topic and tell the endpoint to drop its publisher.
+        /// The counterpart of UnsubscribeAll for the publishing direction.
+        /// </summary>
+        /// <remarks>
+        /// The message sender is kept: an outgoing queue may still hold a
+        /// reference to it, and a later RegisterPublisher replaces it anyway.
+        /// Clearing IsPublisher is what stops OnConnectionEstablished from
+        /// re-registering this topic after a reconnect.
+        /// </remarks>
+        public void UnregisterPublisher()
+        {
+            if (!IsPublisher)
+            {
+                return;
+            }
+            IsPublisher = false;
+            IsPublisherLatched = false;
+            m_ConnectionInternal.SendPublisherUnregistration(m_Topic);
+        }
+
         public void Publish(Message message)
         {
             m_LastMessageSentRealtime = ROSConnection.s_RealTimeSinceStartup;
