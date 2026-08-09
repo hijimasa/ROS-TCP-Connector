@@ -147,9 +147,9 @@ namespace Unity.Robotics.ROSTCPConnector
             }
         }
 
-        RosTopicState AddTopic(string topic, string rosMessageName, bool isService = false)
+        RosTopicState AddTopic(string topic, string rosMessageName, bool isService = false, MessageSubtopic subtopic = MessageSubtopic.Default)
         {
-            RosTopicState newTopic = new RosTopicState(topic, rosMessageName, this, new InternalAPI(this), isService);
+            RosTopicState newTopic = new RosTopicState(topic, rosMessageName, this, new InternalAPI(this), isService, subtopic);
             lock (m_Topics)
             {
                 m_Topics.Add(topic, newTopic);
@@ -367,6 +367,65 @@ namespace Unity.Robotics.ROSTCPConnector
             return topicState;
         }
 
+        /// <summary>
+        /// Implement a ROS action server in Unity. The endpoint owns the actual ROS
+        /// action server and forwards each goal here.
+        /// </summary>
+        /// <param name="topic">The action name, e.g. "simulate_steps".</param>
+        /// <param name="callback">
+        /// Runs one goal. Publish progress through the handle, watch
+        /// <see cref="ActionGoalHandle.IsCancelRequested"/> to stop early, and return
+        /// the result. Returning normally reports SUCCEEDED unless the goal was
+        /// cancelled or <see cref="ActionGoalHandle.Abort"/> was called.
+        /// </param>
+        /// <remarks>
+        /// The callback is invoked from Update, like a service implementation, so it
+        /// may touch Unity objects freely. It is awaited, so it can span many frames.
+        /// </remarks>
+        public void ImplementAction<TGoal, TResult>(string topic, Func<TGoal, ActionGoalHandle, Task<TResult>> callback)
+            where TGoal : Message
+            where TResult : Message
+        {
+            // Goal, feedback and result all share the action's ros message name and
+            // are told apart by their subtopic, the same way a service tells its
+            // request and response apart.
+            string rosMessageName = MessageRegistry.GetRosMessageName<TGoal>();
+            RosTopicState info = GetOrCreateActionTopic(topic, rosMessageName);
+            info.ImplementAction(callback);
+        }
+
+        /// <summary>Drop a Unity action server and tell the endpoint to remove it.</summary>
+        public void UnimplementAction(string topic)
+        {
+            RosTopicState state = GetTopic(topic);
+            if (state != null)
+            {
+                state.UnimplementAction();
+            }
+        }
+
+        RosTopicState GetOrCreateActionTopic(string topic, string rosMessageName)
+        {
+            RosTopicState state = GetTopic(topic);
+            if (state != null)
+            {
+                if (state.RosMessageName != rosMessageName)
+                {
+                    state.ChangeRosMessageName(rosMessageName);
+                }
+                return state;
+            }
+
+            // Incoming traffic on an action name is always a goal, so the state
+            // deserializes with the Goal subtopic.
+            RosTopicState result = AddTopic(topic, rosMessageName, false, MessageSubtopic.Goal);
+            foreach (Action<RosTopicState> callback in m_NewTopicCallbacks)
+            {
+                callback(result);
+            }
+            return result;
+        }
+
         public void RegisterRosService<TRequest, TResponse>(string topic) where TRequest : Message where TResponse : Message
         {
             RegisterRosService(topic, MessageRegistry.GetRosMessageName<TRequest>(), MessageRegistry.GetRosMessageName<TResponse>());
@@ -442,6 +501,32 @@ namespace Unity.Robotics.ROSTCPConnector
             public void SendServiceRequest(int serviceId)
             {
                 m_Self.SendSysCommand(SysCommand.k_SysCommand_ServiceRequest, new SysCommand_Service { srv_id = serviceId });
+            }
+
+            public void SendUnityActionRegistration(string topic, string rosMessageName, NetworkStream stream = null)
+            {
+                m_Self.SendSysCommand(SysCommand.k_SysCommand_UnityAction, new SysCommand_TopicAndType { topic = topic, message_name = rosMessageName }, stream);
+            }
+
+            public void SendUnityActionUnregistration(string topic, NetworkStream stream = null)
+            {
+                m_Self.SendSysCommand(SysCommand.k_SysCommand_RemoveUnityAction, new SysCommand_Topic { topic = topic }, stream);
+            }
+
+            public void SendActionFeedback(int actionId, string topic, Message feedback)
+            {
+                m_Self.QueueSysCommandWithMessage(
+                    SysCommand.k_SysCommand_ActionFeedback,
+                    new SysCommand_Action { action_id = actionId },
+                    topic, feedback);
+            }
+
+            public void SendActionResult(int actionId, int status, string topic, Message result)
+            {
+                m_Self.QueueSysCommandWithMessage(
+                    SysCommand.k_SysCommand_ActionResult,
+                    new SysCommand_ActionResult { action_id = actionId, status = status, has_result = result != null },
+                    topic, result);
             }
 
             public void AddSenderToQueue(OutgoingMessageSender sender)
@@ -733,6 +818,41 @@ namespace Unity.Robotics.ROSTCPConnector
 
                             topicState.HandleUnityServiceRequest(requestBytes, serviceCommand.srv_id);
                         };
+                    }
+                    break;
+
+                case SysCommand.k_SysCommand_ActionGoal:
+                    {
+                        var actionCommand = JsonUtility.FromJson<SysCommand_Action>(json);
+
+                        // As with a service request, the next incoming message is the
+                        // payload this command refers to.
+                        m_SpecialIncomingMessageHandler = (string actionTopic, byte[] goalBytes) =>
+                        {
+                            m_SpecialIncomingMessageHandler = null;
+
+                            RosTopicState topicState = GetTopic(actionTopic);
+                            if (topicState == null)
+                            {
+                                Debug.LogError($"Unity action {actionTopic} has not been implemented!");
+                                return;
+                            }
+
+                            topicState.HandleActionGoal(goalBytes, actionCommand.action_id);
+                        };
+                    }
+                    break;
+
+                case SysCommand.k_SysCommand_ActionCancel:
+                    {
+                        var actionCommand = JsonUtility.FromJson<SysCommand_ActionCancel>(json);
+                        RosTopicState topicState = GetTopic(actionCommand.topic);
+                        if (topicState == null)
+                        {
+                            Debug.LogError($"Cancel for unknown Unity action {actionCommand.topic}!");
+                            break;
+                        }
+                        topicState.HandleActionCancel(actionCommand.action_id);
                     }
                     break;
 
@@ -1059,6 +1179,40 @@ namespace Unity.Robotics.ROSTCPConnector
         {
             PopulateSysCommand(m_MessageSerializer, command, param);
             m_OutgoingMessageQueue.Enqueue(new SysCommandSender(m_MessageSerializer.GetBytesSequence()));
+        }
+
+        /// <summary>
+        /// Queue a sys command and the message that belongs with it as one unit.
+        /// </summary>
+        /// <remarks>
+        /// Action feedback and results are "command, then message" pairs: the reader
+        /// on the other end routes the next message by the command it just saw. They
+        /// therefore cannot go through TopicMessageSender, which drops the oldest
+        /// message when its queue overflows — a dropped message would leave its
+        /// command paired with whatever message came next, desynchronising the
+        /// stream. Serialising both into a single SysCommandSender keeps them
+        /// together and out of reach of the queue limit.
+        /// </remarks>
+        internal void QueueSysCommandWithMessage(string command, object param, string topic, Message message)
+        {
+            PopulateSysCommand(m_MessageSerializer, command, param);
+            List<byte[]> bytes = m_MessageSerializer.GetBytesSequence();
+
+            if (message != null)
+            {
+                // The message has to be built on a freshly cleared serializer.
+                // MessageSerializer.Write(string) aligns to the serializer's current
+                // offset, so appending the destination onto the buffer that already
+                // holds the sys command would insert padding bytes between the two —
+                // the reader would take that padding as the start of the next
+                // destination and the whole stream would come apart.
+                m_MessageSerializer.Clear();
+                m_MessageSerializer.Write(topic);
+                m_MessageSerializer.SerializeMessageWithLength(message);
+                bytes.AddRange(m_MessageSerializer.GetBytesSequence());
+            }
+
+            m_OutgoingMessageQueue.Enqueue(new SysCommandSender(bytes));
         }
 
         [Obsolete("Use Publish instead of Send", false)]

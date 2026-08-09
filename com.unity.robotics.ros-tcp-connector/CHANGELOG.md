@@ -15,6 +15,12 @@ Clear static data on destroy
 
 ### Added
 
+Action servers implemented in Unity, through `ROSConnection.ImplementAction<TGoal, TResult>`.
+The endpoint owns the ROS action server and forwards each goal; the Unity implementation
+publishes feedback and watches for cancellation through the `ActionGoalHandle` it is handed.
+Requires the matching `__unity_action` / `__action_goal` / `__action_cancel` /
+`__action_feedback` / `__action_result` system commands in ROS-TCP-Endpoint.
+
 ### Changed
 
 ### Deprecated

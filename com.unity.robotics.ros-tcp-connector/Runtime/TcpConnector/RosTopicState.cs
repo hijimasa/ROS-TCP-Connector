@@ -41,6 +41,13 @@ namespace Unity.Robotics.ROSTCPConnector
         public bool IsUnityService => m_ServiceImplementation != null || m_ServiceImplementationAsync != null;
         public bool IsService => m_ServiceResponseTopic != null || m_Subtopic == MessageSubtopic.Response;
 
+        // Action server implemented on the Unity side. Incoming messages on this
+        // topic are goals; feedback and results go back out on the same name,
+        // tagged by the sys command that precedes them.
+        Func<Message, ActionGoalHandle, Task<Message>> m_ActionImplementation;
+        public bool IsUnityAction => m_ActionImplementation != null;
+        readonly Dictionary<int, ActionGoalHandle> m_ActiveGoals = new Dictionary<int, ActionGoalHandle>();
+
         List<Action<Message>> m_SubscriberCallbacks = new List<Action<Message>>();
         public bool HasSubscriberCallback => m_SubscriberCallbacks.Count > 0;
         public bool SentSubscriberRegistration { get; private set; }
@@ -193,6 +200,100 @@ namespace Unity.Robotics.ROSTCPConnector
             };
             m_ConnectionInternal.SendUnityServiceRegistration(m_Topic, m_RosMessageName);
             CreateMessageSender(queueSize);
+        }
+
+        public void ImplementAction<TGoal, TResult>(Func<TGoal, ActionGoalHandle, Task<TResult>> implementation)
+            where TGoal : Message
+            where TResult : Message
+        {
+            m_ActionImplementation = async (Message msg, ActionGoalHandle handle) =>
+            {
+                TResult result = await implementation((TGoal)msg, handle);
+                return result;
+            };
+            m_ConnectionInternal.SendUnityActionRegistration(m_Topic, m_RosMessageName);
+        }
+
+        public void UnimplementAction()
+        {
+            if (!IsUnityAction)
+            {
+                return;
+            }
+            m_ActionImplementation = null;
+            m_ActiveGoals.Clear();
+            m_ConnectionInternal.SendUnityActionUnregistration(m_Topic);
+        }
+
+        /// <summary>
+        /// Run one goal that the endpoint forwarded, then report the result.
+        /// </summary>
+        /// <remarks>
+        /// async void for the same reason as HandleUnityServiceRequest: this is
+        /// invoked from the connection's Update pump, which has nothing to await on.
+        /// Exceptions are turned into an ABORTED result rather than being allowed to
+        /// escape, because a goal that never reports back leaves the ROS side waiting
+        /// forever.
+        /// </remarks>
+        internal async void HandleActionGoal(byte[] data, int actionId)
+        {
+            if (!IsUnityAction)
+            {
+                Debug.LogError($"Unity action '{m_Topic}' has not been implemented!");
+                return;
+            }
+
+            OnMessageReceived(data);
+            Message goalMessage = Deserialize(data);
+
+            ActionGoalHandle handle = new ActionGoalHandle(this, actionId);
+            m_ActiveGoals[actionId] = handle;
+
+            Message result = null;
+            try
+            {
+                result = await m_ActionImplementation(goalMessage, handle);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"Unity action '{m_Topic}' threw: {e}");
+                handle.Abort();
+            }
+            finally
+            {
+                m_ActiveGoals.Remove(actionId);
+            }
+
+            if (handle.IsCancelRequested)
+            {
+                handle.MarkCanceled();
+            }
+
+            if (result == null)
+            {
+                // Nothing to send back, but the endpoint must still be told the goal
+                // is over. It fills in a default result for the action type.
+                m_ConnectionInternal.SendActionResult(actionId, ActionGoalStatus.Aborted, m_Topic, null);
+                return;
+            }
+            m_ConnectionInternal.SendActionResult(actionId, handle.Status, m_Topic, result);
+        }
+
+        internal void HandleActionCancel(int actionId)
+        {
+            ActionGoalHandle handle;
+            if (!m_ActiveGoals.TryGetValue(actionId, out handle))
+            {
+                // The goal finished before the cancel arrived. Nothing to do.
+                return;
+            }
+            handle.IsCancelRequested = true;
+        }
+
+        internal void SendActionFeedback(int actionId, Message feedback)
+        {
+            m_LastMessageSentRealtime = ROSConnection.s_RealTimeSinceStartup;
+            m_ConnectionInternal.SendActionFeedback(actionId, m_Topic, feedback);
         }
 
         public void RegisterPublisher(int queueSize, bool latch)

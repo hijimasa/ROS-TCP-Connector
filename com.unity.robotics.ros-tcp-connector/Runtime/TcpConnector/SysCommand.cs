@@ -25,6 +25,16 @@ namespace Unity.Robotics.ROSTCPConnector
         public const string k_SysCommand_Ping = "__ping";
         public const string k_SysCommand_PingResponse = "__ping_response";
 
+        // Action servers implemented on the Unity side. The endpoint owns the ROS
+        // action server and forwards each goal here; feedback and the final result
+        // travel back the other way, tagged with the same action_id.
+        public const string k_SysCommand_UnityAction = "__unity_action";
+        public const string k_SysCommand_RemoveUnityAction = "__remove_unity_action";
+        public const string k_SysCommand_ActionGoal = "__action_goal";
+        public const string k_SysCommand_ActionCancel = "__action_cancel";
+        public const string k_SysCommand_ActionFeedback = "__action_feedback";
+        public const string k_SysCommand_ActionResult = "__action_result";
+
         public abstract string Command
         {
             get;
@@ -94,6 +104,33 @@ namespace Unity.Robotics.ROSTCPConnector
     public struct SysCommand_Service
     {
         public int srv_id;
+    }
+
+    // Identifies one in-flight action goal. The endpoint allocates the id when it
+    // forwards a goal, and every later message about that goal carries it back.
+    public struct SysCommand_Action
+    {
+        public int action_id;
+    }
+
+    // A cancel request is not followed by a message, so unlike __action_goal it has
+    // to name the action itself rather than relying on the payload's destination.
+    public struct SysCommand_ActionCancel
+    {
+        public string topic;
+        public int action_id;
+    }
+
+    // As above, plus the terminal state of the goal, using the values from
+    // action_msgs/msg/GoalStatus (SUCCEEDED = 4, CANCELED = 5, ABORTED = 6).
+    public struct SysCommand_ActionResult
+    {
+        public int action_id;
+        public int status;
+        // False when the Unity side had no result to send (it threw, say). The
+        // endpoint then fills in a default result and, importantly, does not wait
+        // for a message to follow this command.
+        public bool has_result;
     }
 
     public struct SysCommand_TopicsRequest
