@@ -139,10 +139,12 @@ namespace Unity.Robotics.ROSTCPConnector
 
             m_ServiceResponseTopic.OnMessageSent(response);
 
-            // send the response message back
-            m_ConnectionInternal.SendUnityServiceResponse(serviceId);
-            m_MessageSender.Queue(response);
-            m_ConnectionInternal.AddSenderToQueue(m_MessageSender);
+            // Send the response back as one queue entry: the endpoint routes the
+            // message that follows the __response command by that command, so the
+            // pair must not be split across two entries. See
+            // ROSConnection.QueueSysCommandWithMessage.
+            m_ConnectionInternal.SendUnityServiceResponse(serviceId, m_Topic, response);
+            TryRecycleSentMessage(response);
         }
 
         Message Deserialize(byte[] data)
@@ -357,10 +359,30 @@ namespace Unity.Robotics.ROSTCPConnector
 
         internal void SendServiceRequest(Message requestMessage, int serviceId)
         {
-            m_ConnectionInternal.SendServiceRequest(serviceId);
-            m_MessageSender.Queue(requestMessage);
-            m_ConnectionInternal.AddSenderToQueue(m_MessageSender);
+            // As with a Unity service response, the __srv command and the request it
+            // refers to have to travel as a single queue entry.
+            m_ConnectionInternal.SendServiceRequest(serviceId, m_Topic, requestMessage);
             OnMessageSent(requestMessage);
+            TryRecycleSentMessage(requestMessage);
+        }
+
+        /// <summary>
+        /// Return a message that has already been serialized to the outgoing queue to
+        /// the topic's message pool, if it has one.
+        /// </summary>
+        /// <remarks>
+        /// Service traffic bypasses TopicMessageSender, which is what normally
+        /// recycles sent messages, so it has to do the recycling itself. This is safe
+        /// to do immediately: unlike the TopicMessageSender path, which serializes on
+        /// the connection thread later on, the message is fully serialized by the time
+        /// the send call returns.
+        /// </remarks>
+        void TryRecycleSentMessage(Message message)
+        {
+            if (m_MessageSender != null && m_MessageSender.MessagePoolEnabled)
+            {
+                m_MessageSender.RecycleMessage(message);
+            }
         }
 
         internal void OnConnectionEstablished(NetworkStream stream)

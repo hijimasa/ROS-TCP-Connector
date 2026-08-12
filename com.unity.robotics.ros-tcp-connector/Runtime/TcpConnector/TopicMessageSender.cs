@@ -162,6 +162,17 @@ namespace Unity.Robotics.ROSTCPConnector
             }
         }
 
+        /// <summary>
+        /// Hand a message that this sender did not send back to the message pool.
+        /// Used by traffic that serializes itself instead of going through the queue
+        /// (service requests and responses), so that setting a message pool on a
+        /// service topic still recycles.
+        /// </summary>
+        internal void RecycleMessage(Message toRecycle)
+        {
+            TryRecycleMessage(toRecycle);
+        }
+
         void TryRecycleMessage(Message toRecycle)
         {
             if (m_MessagePool != null)

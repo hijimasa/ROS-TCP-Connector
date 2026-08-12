@@ -127,6 +127,10 @@ namespace Unity.Robotics.ROSTCPConnector
         }
 
         MessageSerializer m_MessageSerializer = new MessageSerializer();
+        // m_MessageSerializer is shared by every caller that queues a sys command, and
+        // those callers are not all on the main thread (a service request can be sent
+        // from anywhere), so serializing into it has to be serialized.
+        readonly object m_MessageSerializerLock = new object();
         MessageDeserializer m_MessageDeserializer = new MessageDeserializer();
         List<Action<string[]>> m_TopicsListCallbacks = new List<Action<string[]>>();
         List<Action<Dictionary<string, string>>> m_TopicsAndTypesListCallbacks = new List<Action<Dictionary<string, string>>>();
@@ -311,9 +315,6 @@ namespace Unity.Robotics.ROSTCPConnector
         // Send a request to a ros service
         public async Task<RESPONSE> SendServiceMessage<RESPONSE>(string rosServiceName, Message serviceRequest) where RESPONSE : Message, new()
         {
-            m_MessageSerializer.Clear();
-            m_MessageSerializer.SerializeMessage(serviceRequest);
-            byte[] requestBytes = m_MessageSerializer.GetBytes();
             TaskPauser pauser = new TaskPauser();
 
             int srvID;
@@ -486,9 +487,12 @@ namespace Unity.Robotics.ROSTCPConnector
                 m_Self.SendSysCommand(SysCommand.k_SysCommand_RemoveUnityService, new SysCommand_Topic { topic = topic }, stream);
             }
 
-            public void SendUnityServiceResponse(int serviceId, NetworkStream stream = null)
+            public void SendUnityServiceResponse(int serviceId, string topic, Message response)
             {
-                m_Self.SendSysCommand(SysCommand.k_SysCommand_ServiceResponse, new SysCommand_Service { srv_id = serviceId }, stream);
+                m_Self.QueueSysCommandWithMessage(
+                    SysCommand.k_SysCommand_ServiceResponse,
+                    new SysCommand_Service { srv_id = serviceId },
+                    topic, response);
             }
 
             public void SendPublisherRegistration(string topic, string message_name, int queueSize, bool latch, NetworkStream stream = null)
@@ -498,9 +502,12 @@ namespace Unity.Robotics.ROSTCPConnector
                 );
             }
 
-            public void SendServiceRequest(int serviceId)
+            public void SendServiceRequest(int serviceId, string topic, Message request)
             {
-                m_Self.SendSysCommand(SysCommand.k_SysCommand_ServiceRequest, new SysCommand_Service { srv_id = serviceId });
+                m_Self.QueueSysCommandWithMessage(
+                    SysCommand.k_SysCommand_ServiceRequest,
+                    new SysCommand_Service { srv_id = serviceId },
+                    topic, request);
             }
 
             public void SendUnityActionRegistration(string topic, string rosMessageName, NetworkStream stream = null)
@@ -1177,39 +1184,57 @@ namespace Unity.Robotics.ROSTCPConnector
 
         public void QueueSysCommand(string command, object param)
         {
-            PopulateSysCommand(m_MessageSerializer, command, param);
-            m_OutgoingMessageQueue.Enqueue(new SysCommandSender(m_MessageSerializer.GetBytesSequence()));
+            List<byte[]> bytes;
+            lock (m_MessageSerializerLock)
+            {
+                PopulateSysCommand(m_MessageSerializer, command, param);
+                bytes = m_MessageSerializer.GetBytesSequence();
+            }
+            m_OutgoingMessageQueue.Enqueue(new SysCommandSender(bytes));
         }
 
         /// <summary>
         /// Queue a sys command and the message that belongs with it as one unit.
         /// </summary>
         /// <remarks>
-        /// Action feedback and results are "command, then message" pairs: the reader
-        /// on the other end routes the next message by the command it just saw. They
-        /// therefore cannot go through TopicMessageSender, which drops the oldest
-        /// message when its queue overflows — a dropped message would leave its
-        /// command paired with whatever message came next, desynchronising the
-        /// stream. Serialising both into a single SysCommandSender keeps them
+        /// Service requests, service responses, action feedback and action results
+        /// are all "command, then message" pairs: the reader on the other end routes
+        /// the next message it reads by the command it just saw. Sending the two
+        /// halves as two separate entries in the outgoing queue lets them come apart
+        /// in two ways, and either one desynchronises the stream for the rest of the
+        /// connection:
+        /// <list type="bullet">
+        /// <item>the message half goes through TopicMessageSender, which drops the
+        /// oldest message when its queue overflows, leaving the command paired with
+        /// whatever message came next;</item>
+        /// <item>the two enqueues are not atomic, so any other thread publishing
+        /// between them slips its message in between the command and the message it
+        /// refers to.</item>
+        /// </list>
+        /// Serialising both halves into a single SysCommandSender keeps them
         /// together and out of reach of the queue limit.
         /// </remarks>
         internal void QueueSysCommandWithMessage(string command, object param, string topic, Message message)
         {
-            PopulateSysCommand(m_MessageSerializer, command, param);
-            List<byte[]> bytes = m_MessageSerializer.GetBytesSequence();
-
-            if (message != null)
+            List<byte[]> bytes;
+            lock (m_MessageSerializerLock)
             {
-                // The message has to be built on a freshly cleared serializer.
-                // MessageSerializer.Write(string) aligns to the serializer's current
-                // offset, so appending the destination onto the buffer that already
-                // holds the sys command would insert padding bytes between the two —
-                // the reader would take that padding as the start of the next
-                // destination and the whole stream would come apart.
-                m_MessageSerializer.Clear();
-                m_MessageSerializer.Write(topic);
-                m_MessageSerializer.SerializeMessageWithLength(message);
-                bytes.AddRange(m_MessageSerializer.GetBytesSequence());
+                PopulateSysCommand(m_MessageSerializer, command, param);
+                bytes = m_MessageSerializer.GetBytesSequence();
+
+                if (message != null)
+                {
+                    // The message has to be built on a freshly cleared serializer.
+                    // MessageSerializer.Write(string) aligns to the serializer's current
+                    // offset, so appending the destination onto the buffer that already
+                    // holds the sys command would insert padding bytes between the two —
+                    // the reader would take that padding as the start of the next
+                    // destination and the whole stream would come apart.
+                    m_MessageSerializer.Clear();
+                    m_MessageSerializer.Write(topic);
+                    m_MessageSerializer.SerializeMessageWithLength(message);
+                    bytes.AddRange(m_MessageSerializer.GetBytesSequence());
+                }
             }
 
             m_OutgoingMessageQueue.Enqueue(new SysCommandSender(bytes));
